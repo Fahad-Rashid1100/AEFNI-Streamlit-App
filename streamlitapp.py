@@ -58,7 +58,7 @@ def initiate_interview(initial_brief_payload):
 def send_chat_message(user_input_text):
     if st.session_state.chat_session_id and user_input_text:
         st.session_state.chat_history.append({"role": "user", "content": user_input_text})
-        payload = {"session_id": st.session_state.chat_session_id, "user_message": user_input_text}
+        payload = {"session_id": st.session_state.chat_session_id, "prompt": user_input_text}
         try:
             response = requests.post(INTERVIEW_SEND_MESSAGE_ENDPOINT, json=payload, timeout=60)
             response.raise_for_status()
