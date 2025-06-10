@@ -6,7 +6,7 @@ import time
 import datetime # For potential use, though backend handles audit timestamp
 
 # --- Configuration ---
-FASTAPI_BASE_URL = "https://aefni-ai.onrender.com/api/v1"
+FASTAPI_BASE_URL = "https://7ngokuvakqinzic4vldalmxyti.srv.us/api/v1"
 INTERVIEW_INITIATE_ENDPOINT = f"{FASTAPI_BASE_URL}/interview/initiate"
 INTERVIEW_SEND_MESSAGE_ENDPOINT = f"{FASTAPI_BASE_URL}/interview/send_message"
 AEFNE_MAIN_ANALYSIS_ENDPOINT = f"{FASTAPI_BASE_URL}/initiate_project_analysis"
