@@ -4,13 +4,15 @@ import requests
 import json
 import time
 import datetime # For potential use, though backend handles audit timestamp
+import uuid # Import uuid to generate session IDs on the client side
 
 # --- Configuration ---
-FASTAPI_BASE_URL = "https://7ngokuvakqinzic4vldalmxyti.srv.us/api/v1"
+FASTAPI_BASE_URL = "http://127.0.0.1:8000/api/v1"
 INTERVIEW_INITIATE_ENDPOINT = f"{FASTAPI_BASE_URL}/interview/initiate"
 INTERVIEW_SEND_MESSAGE_ENDPOINT = f"{FASTAPI_BASE_URL}/interview/send_message"
 AEFNE_MAIN_ANALYSIS_ENDPOINT = f"{FASTAPI_BASE_URL}/initiate_project_analysis"
 AEFNE_AUDIT_ENDPOINT = f"{FASTAPI_BASE_URL}/perform_audit"
+FILE_UPLOAD_ENDPOINT = f"{FASTAPI_BASE_URL}/upload_files/"
 
 # --- Initialize Session State (COMPLETE AND CORRECTED) ---
 if 'stage' not in st.session_state: 
@@ -33,26 +35,63 @@ if 'payload_for_main_analysis_rerun' not in st.session_state:
     st.session_state.payload_for_main_analysis_rerun = None
 if 'audit_report_data' not in st.session_state: 
     st.session_state.audit_report_data = None
+if 'uploaded_files_info' not in st.session_state: st.session_state.uploaded_files_info = None
+if 'project_currency' not in st.session_state: st.session_state.project_currency = "USD"
 # --- END OF SESSION STATE INITIALIZATION ---
 
 
 # --- Helper Functions ---
-def initiate_interview(initial_brief_payload):
+def start_new_project_process(initial_brief_payload, uploaded_files_list):
+    # Step 1: Generate a NEW session_id for this new project run
+    session_id = str(uuid.uuid4())
+    st.session_state.chat_session_id = session_id
+    st.session_state.project_currency = initial_brief_payload.get("currency", "USD") # Store currency
+    
+    # Step 2: Upload files if they exist, using the new session_id
+    if uploaded_files_list:
+        try:
+            with st.spinner(f"Uploading {len(uploaded_files_list)} file(s)..."):
+                # Prepare files for multipart upload
+                files_to_upload = [('files', (file.name, file, file.type)) for file in uploaded_files_list]
+                
+                response_upload = requests.post(
+                    FILE_UPLOAD_ENDPOINT,
+                    data={'session_id': session_id},
+                    files=files_to_upload,
+                    timeout=60
+                )
+                response_upload.raise_for_status()
+            st.session_state.uploaded_files_info = response_upload.json()
+            st.success("Files uploaded successfully!")
+            time.sleep(1) # Give user time to see success message
+        except Exception as e:
+            st.error(f"File Upload Failed: {e}. Please try again.")
+            st.session_state.chat_session_id = None # Invalidate session on failure
+            st.session_state.stage = "initial_form"
+            st.rerun()
+            return # IMPORTANT: Stop if upload fails
+
+    # Step 3: Initiate the interview
     try:
         with st.spinner("AEFNE is preparing for the interview..."):
-            response = requests.post(INTERVIEW_INITIATE_ENDPOINT, json=initial_brief_payload, timeout=30)
+            # We now pass the session_id to the initiate endpoint.
+            # This requires a backend change to the /interview/initiate endpoint.
+            payload_for_initiate = {
+                "session_id": session_id,
+                "user_brief": initial_brief_payload
+            }
+            # Note: You must update the /interview/initiate endpoint to accept this payload.
+            response = requests.post(INTERVIEW_INITIATE_ENDPOINT, json=payload_for_initiate, timeout=45)
             response.raise_for_status()
+        
         data = response.json()
-        st.session_state.chat_session_id = data.get("session_id")
+        st.session_state.chat_session_id = data.get("session_id", session_id)
         st.session_state.chat_history = [{"role": "assistant", "content": data.get("ai_response")}]
         st.session_state.interview_active = data.get("conversation_is_active", True)
         st.session_state.stage = "interview"
         st.rerun()
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         st.error(f"API Error (Initiate Interview): {e}")
-        st.session_state.stage = "initial_form" # Revert to form on error
-    except json.JSONDecodeError as je:
-        st.error(f"API Response Error (Initiate): Could not parse JSON. Raw: {je.doc[:200]}...")
         st.session_state.stage = "initial_form"
 
 def send_chat_message(user_input_text):
@@ -73,31 +112,47 @@ def send_chat_message(user_input_text):
         except json.JSONDecodeError as je: st.error(f"API Response Error (Send Message). Raw: {je.doc[:200]}...")
 
 def trigger_main_analysis_from_interview():
-    if st.session_state.final_brief_for_analysis:
+    if st.session_state.final_brief_for_analysis and st.session_state.chat_session_id:
         enriched_brief = st.session_state.final_brief_for_analysis
+        
+        # This part constructs the rich text summary for the UserBrief
         summary_parts = [
             f"Initial Idea: {enriched_brief.get('project_idea_summary_initial', 'N/A')}",
             f"Goal: {enriched_brief.get('project_goal', 'N/A')}",
             f"Budget: {enriched_brief.get('budget_range_pkr', 'N/A')}",
             f"Location: {enriched_brief.get('project_location_details', 'N/A')}",
-            f"Timeline: {enriched_brief.get('timeline_expectation', 'N/A')}"
+            f"Project Currency: The currency for all financial figures is {enriched_brief.get('currency', 'USD')}."
+            # The file summary is now part of the EnrichedUserProjectBrief schema
+            # But for the handoff, we can just pass the references directly.
+            # The DataStructurerForCFO will use the references.
         ]
         adapted_summary = ". ".join(summary_parts)
-        if len(adapted_summary) > 1000: adapted_summary = adapted_summary[:997] + "..."
+        if len(adapted_summary) > 1500: adapted_summary = adapted_summary[:1497] + "..."
         
-        st.session_state.payload_for_main_analysis_rerun = {
-            "project_idea_summary": adapted_summary,
-            "has_existing_files": enriched_brief.get("has_existing_files_confirmed", False),
-            "existing_files_description": enriched_brief.get("existing_files_description_updated")
-        }
+        # --- THIS IS THE CORRECT, FINAL PAYLOAD STRUCTURE ---
+        payload = {
+            "session_id": st.session_state.chat_session_id,
+            "user_brief": {
+                "project_idea_summary": adapted_summary,
+                "has_existing_files": enriched_brief.get("has_existing_files_confirmed", False),
+                "existing_files_description": enriched_brief.get("existing_files_description_updated"),
+            "currency": enriched_brief.get("currency", "USD") # Pass currency along
+        },
+        "file_references": enriched_brief.get("uploaded_file_references", [])
+    }
+        
+        # Store this complete payload and change the stage
+        st.session_state.payload_for_main_analysis_rerun = payload
         st.session_state.stage = "analysis_progress"
         st.rerun()
     else:
-        st.error("Final brief missing."); st.session_state.stage = "review_brief"
+        st.error("Final brief or Session ID is missing. Cannot proceed.")
+        st.session_state.stage = "review_brief" # Stay on the review page
 
-def trigger_main_analysis_from_override(override_payload):
-    st.session_state.payload_for_main_analysis_rerun = override_payload
-    st.session_state.stage = "analysis_progress" # Re-uses the same progress stage
+def trigger_main_analysis(payload):
+    # This function now correctly receives the fully formed payload
+    st.session_state.payload_for_main_analysis = payload
+    st.session_state.stage = "analysis_progress"
     st.rerun()
 
 def trigger_audit():
@@ -115,6 +170,7 @@ def reset_app_state():
     st.session_state.has_existing_files_checked = False
     st.session_state.payload_for_main_analysis_rerun = None
     st.session_state.audit_report_data = None # Reset audit data too
+    st.session_state.uploaded_files_info = None
     st.rerun()
 
 # --- Streamlit UI ---
@@ -123,20 +179,41 @@ st.title("AEFNE AI Platform - Multi-Agent Demo 🚀")
 
 # ============================ STAGE 1: INITIAL FORM ============================
 if st.session_state.stage == "initial_form":
-    st.header("1. Tell Us About Your Project Idea")
-    with st.form("project_idea_form_key_v4"): # Incremented key for good measure
-        project_idea_summary = st.text_area("Brief Project Idea Summary:",value=st.session_state.initial_form_data.get("project_idea_summary", ""),height=100,placeholder="e.g., I want to build a small, eco-friendly cafe...")
-        has_existing_files_checked = st.checkbox("Do you have existing project files (sketches, BOQs, etc.)?", value=st.session_state.get('has_existing_files_checked', False), key='has_existing_files_checkbox_v4')
-        st.session_state.has_existing_files_checked = st.session_state.has_existing_files_checkbox_v4 # Ensure state updates
-        existing_files_description_local = st.session_state.initial_form_data.get("existing_files_description", "")
-        if st.session_state.has_existing_files_checked:
-            existing_files_description_local = st.text_area("Briefly describe your existing files:", value=existing_files_description_local, height=75, placeholder="e.g., Rough layout sketch and equipment list.")
-        submitted_initial_form = st.form_submit_button("Start Interview with AEFNE AI")
-        if submitted_initial_form:
-            if not project_idea_summary.strip(): st.error("Please provide a Project Idea Summary.")
+    st.header("1. Submit Your Project for AEFNE Analysis")
+    st.markdown("Provide an initial summary and any relevant files (images, documents). AEFNE will analyze them and then start an interactive interview.")
+
+    with st.form("project_idea_form_with_files_v3"):
+        project_idea_summary = st.text_area(
+            "Brief Project Idea Summary:",
+            height=100,
+            placeholder="e.g., I want to build a small, eco-friendly cafe in a suburban area. I have a sketch of the floor plan."
+        )
+        
+        # <<< NEW CURRENCY FIELD >>>
+        currency = st.selectbox("Select Project Currency", ["USD", "PKR", "AED", "SAR", "EUR"], index=0)
+
+        uploaded_files = st.file_uploader(
+            "Upload Documents or Images (Optional)",
+            accept_multiple_files=True,
+            type=['png', 'jpg', 'jpeg', 'pdf', 'txt']
+        )
+        
+        submitted_form = st.form_submit_button("Begin AEFNE Process")
+
+        if submitted_form:
+            if not project_idea_summary.strip():
+                st.error("Please provide a Project Idea Summary.")
             else:
-                st.session_state.initial_form_data = {"project_idea_summary": project_idea_summary, "has_existing_files": st.session_state.has_existing_files_checked, "existing_files_description": existing_files_description_local if st.session_state.has_existing_files_checked else None}
-                initiate_interview(st.session_state.initial_form_data)
+                # Prepare the initial brief payload
+                brief = {
+                    "project_idea_summary": project_idea_summary,
+                    "has_existing_files": bool(uploaded_files),
+                    "existing_files_description": f"{len(uploaded_files)} files uploaded: " + ", ".join([f.name for f in uploaded_files]) if uploaded_files else "No files uploaded.",
+                    "currency": currency # <<< ADD CURRENCY TO PAYLOAD
+                }
+                st.session_state.initial_form_data = brief
+                start_new_project_process(brief, uploaded_files)
+
 
 # ============================ STAGE 2: INTERVIEW CHAT ============================
 elif st.session_state.stage == "interview":
@@ -244,10 +321,38 @@ elif st.session_state.stage == "results_display":
                 override_quality_level = st.selectbox("Override Quality Level", ["Premium", "Standard", "Basic"], index=1)
                 submitted_override = st.form_submit_button("Re-run Analysis with These Override Parameters")
                 if submitted_override:
-                    override_summary = (f"Project Concept: {override_project_name}. Original Goal Context: {enriched_brief.get('project_goal', 'N/A')}. DEMO OVERRIDE - Assumed VIAB-equivalent figures: Estimated Total Cost is {override_total_cost:.0f} PKR, Number of Units is {int(override_num_units)}, Building Type for costing is '{override_building_type}', Location context for costing: '{override_location_factors}', Avg. Price Per Unit for revenue is approx {override_price_per_unit:.0f} PKR. Market Factor: {override_market_factor}. Quality: {override_quality_level}. Original file notes: {enriched_brief.get('existing_files_description_updated', 'N/A')}")
-                    if len(override_summary) > 1200: override_summary = override_summary[:1197] + "..."
-                    override_payload = {"project_idea_summary": override_summary, "has_existing_files": enriched_brief.get("has_existing_files_confirmed", False), "existing_files_description": enriched_brief.get("existing_files_description_updated", "Files described in interview.")}
-                    trigger_main_analysis_from_override(override_payload) # This sets payload and changes stage to "analysis_progress"
+                    # --- THIS IS THE CORRECTED PAYLOAD CONSTRUCTION ---
+                    
+                    # 1. Get the original enriched_brief to access session_id and original file references
+                    enriched_brief = st.session_state.get("final_brief_for_analysis", {})
+
+                    # 2. Construct the rich text summary from the override form fields
+                    override_summary = (
+                        f"Project Concept: {override_project_name}. Original Goal Context: {enriched_brief.get('project_goal', 'N/A')}. "
+                        f"DEMO OVERRIDE - Assumed VIAB-equivalent figures: "
+                        f"Estimated Total Cost is {override_total_cost:.0f} PKR, "
+                        f"Number of Units is {int(override_num_units)}, "
+                        f"Building Type for costing is '{override_building_type}', "
+                        f"Location context for costing: '{override_location_factors}', "
+                        f"Avg. Price Per Unit for revenue is approx {override_price_per_unit:.0f} PKR. "
+                        f"Market Factor: {override_market_factor}. Quality: {override_quality_level}."
+                    )
+                    
+                    # 3. Construct the nested 'user_brief' object
+                    user_brief_for_payload = {
+                        "project_idea_summary": override_summary,
+                        "has_existing_files": enriched_brief.get("has_existing_files_confirmed", False),
+                        "existing_files_description": enriched_brief.get("existing_files_description_updated"),
+                        "currency": st.session_state.project_currency # Pass original currency
+                    }
+                    final_payload_for_rerun = {
+                        "session_id": st.session_state.chat_session_id,
+                        "user_brief": user_brief_for_payload,
+                        "file_references": enriched_brief.get("uploaded_file_references", [])
+                    }
+
+                    # 5. Call the trigger function with this correctly structured payload
+                    trigger_main_analysis(final_payload_for_rerun) # We can use the same trigger as the normal path
         
         elif "error" in results:
             st.error(f"Analysis Process Terminated."); 
@@ -255,16 +360,17 @@ elif st.session_state.stage == "results_display":
             else: st.warning(f"Reason: {results['error']}")
         else: 
             st.success("AI Financial Analysis Complete!"); st.balloons()
-            st.subheader(f"Results for Project: {results.get('project_name', 'N/A')}")
-            col1, col2, col3 = st.columns(3); 
-            with col1: st.metric(label="Projected Revenue (PKR)", value=f"{results.get('calculated_revenue'):,.0f}" if results.get('calculated_revenue') is not None else "N/A")
+            currency_code = st.session_state.get("project_currency", "USD")
+            st.subheader(f"Key Financial Projections ({currency_code})") # <<< DYNAMIC CURRENCY IN TITLE
+            col1, col2, col3 = st.columns(3)
+            with col1: st.metric(label=f"Projected Revenue ({currency_code})", value=f"{results.get('calculated_revenue'):,.0f}" if results.get('calculated_revenue') is not None else "N/A")
             cost_disp = "N/A"
-            if results.get("detailed_financial_analysis") and results["detailed_financial_analysis"].get("viability_metrics"): cost_v = results["detailed_financial_analysis"]["viability_metrics"].get("initial_investment_for_metrics_pkr"); 
-            elif results.get("inputs_received") and results["inputs_received"].get("estimated_total_cost"): cost_v = results["inputs_received"].get("estimated_total_cost"); 
-            else: cost_v = None
-            if cost_v is not None: cost_disp = f"{cost_v:,.0f}"
-            with col2: st.metric(label="AI Estimated Project Cost (PKR)", value=cost_disp)
-            with col3: st.metric(label="Projected Profit/Loss (PKR)", value=f"{results.get('calculated_profit_loss'):,.0f}" if results.get('calculated_profit_loss') is not None else "N/A")
+            if results.get('calculated_cost') is not None:
+                cost_disp = f"{results.get('calculated_cost'):,.0f}"
+            elif results.get('estimated_cost_from_brief') is not None:
+                cost_disp = f"{results.get('estimated_cost_from_brief'):,.0f} (from brief)"
+            with col2: st.metric(label=f"AI Estimated Project Cost ({currency_code})", value=cost_disp)
+            with col3: st.metric(label=f"Projected Profit/Loss ({currency_code})", value=f"{results.get('calculated_profit_loss'):,.0f}" if results.get('calculated_profit_loss') is not None else "N/A")
             st.subheader("AI CFO Strategic Summary:"); st.markdown(f"> {results.get('summary_text', 'Not available.')}")
             if results.get("detailed_financial_analysis"):
                 fa_report = results["detailed_financial_analysis"]
