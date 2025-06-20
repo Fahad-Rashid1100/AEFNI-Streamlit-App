@@ -7,7 +7,7 @@ import datetime # For potential use, though backend handles audit timestamp
 import uuid # Import uuid to generate session IDs on the client side
 
 # --- Configuration ---
-FASTAPI_BASE_URL = "https://7ngokuvakqinzic4vldalmxyti.srv.us/api/v1"
+FASTAPI_BASE_URL = "http://127.0.0.1:8000/api/v1"
 INTERVIEW_INITIATE_ENDPOINT = f"{FASTAPI_BASE_URL}/interview/initiate"
 INTERVIEW_SEND_MESSAGE_ENDPOINT = f"{FASTAPI_BASE_URL}/interview/send_message"
 AEFNE_MAIN_ANALYSIS_ENDPOINT = f"{FASTAPI_BASE_URL}/initiate_project_analysis"
@@ -195,7 +195,7 @@ if st.session_state.stage == "initial_form":
         uploaded_files = st.file_uploader(
             "Upload Documents or Images (Optional)",
             accept_multiple_files=True,
-            type=['png', 'jpg', 'jpeg', 'pdf', 'txt']
+            type=['png', 'jpg', 'jpeg', 'pdf', 'txt', 'csv', 'xlsx'] 
         )
         
         submitted_form = st.form_submit_button("Begin AEFNE Process")
@@ -268,7 +268,16 @@ elif st.session_state.stage in ["analysis_progress", "analysis_progress_from_ove
     analysis_data_from_api = None 
     api_called_this_stage = False
     try:
-        progress_stages = {10:"Pre-processing data...",25:"VIAB Checks (simulated)...",40:"Structuring data...",55:"Cost Estimation...",70:"Revenue Projection (RAG)...",80:"Detailed Financial Modeling...",90:"CFO Strategic Review...",99:"Compiling Final Report..."}
+        progress_stages = {
+            10: "Initializing analysis...",
+            20: "Structuring project data from interview...",
+            35: "AI Cost Estimator is running...",
+            50: "AI Revenue Projector is querying knowledge base...",
+            65: "Delegating to AI Financial Analyst for deep modeling...",
+            80: "AI CFO is performing strategic review of FA report...",
+            95: "Compiling final report and strategic summary..."
+        }
+
         for pc, txt in progress_stages.items():
             time.sleep(0.7 if pc < 80 else 0.2); progress_bar.progress(pc, text=f"{progress_bar_text_prefix}{txt}")
             if pc >= 20 and not api_called_this_stage : 
