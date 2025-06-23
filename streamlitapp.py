@@ -7,7 +7,7 @@ import datetime # For potential use, though backend handles audit timestamp
 import uuid # Import uuid to generate session IDs on the client side
 
 # --- Configuration ---
-FASTAPI_BASE_URL = "https://7ngokuvakqinzic4vldalmxyti.srv.us/api/v1"
+FASTAPI_BASE_URL = "http://127.0.0.1:8000/api/v1"
 INTERVIEW_INITIATE_ENDPOINT = f"{FASTAPI_BASE_URL}/interview/initiate"
 INTERVIEW_SEND_MESSAGE_ENDPOINT = f"{FASTAPI_BASE_URL}/interview/send_message"
 AEFNE_MAIN_ANALYSIS_ENDPOINT = f"{FASTAPI_BASE_URL}/initiate_project_analysis"
@@ -42,51 +42,31 @@ if 'project_currency' not in st.session_state: st.session_state.project_currency
 
 # --- Helper Functions ---
 def start_new_project_process(initial_brief_payload, uploaded_files_list):
-    # Step 1: Generate a NEW session_id for this new project run
-    session_id = str(uuid.uuid4())
-    st.session_state.chat_session_id = session_id
-    st.session_state.project_currency = initial_brief_payload.get("currency", "USD") # Store currency
-    
-    # Step 2: Upload files if they exist, using the new session_id
-    if uploaded_files_list:
-        try:
-            with st.spinner(f"Uploading {len(uploaded_files_list)} file(s)..."):
-                # Prepare files for multipart upload
-                files_to_upload = [('files', (file.name, file, file.type)) for file in uploaded_files_list]
-                
-                response_upload = requests.post(
-                    FILE_UPLOAD_ENDPOINT,
-                    data={'session_id': session_id},
-                    files=files_to_upload,
-                    timeout=60
-                )
-                response_upload.raise_for_status()
-            st.session_state.uploaded_files_info = response_upload.json()
-            st.success("Files uploaded successfully!")
-            time.sleep(1) # Give user time to see success message
-        except Exception as e:
-            st.error(f"File Upload Failed: {e}. Please try again.")
-            st.session_state.chat_session_id = None # Invalidate session on failure
-            st.session_state.stage = "initial_form"
-            st.rerun()
-            return # IMPORTANT: Stop if upload fails
-
-    # Step 3: Initiate the interview
+    """
+    Calls the new single backend endpoint to initiate a session.
+    The payload is now a simple dictionary with just the project summary.
+    """
     try:
-        with st.spinner("AEFNE is preparing for the interview..."):
-            # We now pass the session_id to the initiate endpoint.
-            # This requires a backend change to the /interview/initiate endpoint.
-            payload_for_initiate = {
-                "session_id": session_id,
-                "user_brief": initial_brief_payload
-            }
-            # Note: You must update the /interview/initiate endpoint to accept this payload.
-            response = requests.post(INTERVIEW_INITIATE_ENDPOINT, json=payload_for_initiate, timeout=45)
+        with st.spinner("AEFNE is initiating your session... This may take a moment."):
+            # Prepare data for multipart/form-data request
+            data_to_send = {'user_brief_json': json.dumps(initial_brief_payload)}
+            
+            files_to_send = []
+            if uploaded_files_list:
+                files_to_send = [('files', (file.name, file, file.type)) for file in uploaded_files_list]
+
+            # Make the single API call
+            response = requests.post(
+                INTERVIEW_INITIATE_ENDPOINT,
+                data=data_to_send,
+                files=files_to_send,
+                timeout=90
+            )
             response.raise_for_status()
         
         data = response.json()
-        st.session_state.chat_session_id = data.get("session_id", session_id)
-        st.session_state.chat_history = [{"role": "assistant", "content": data.get("ai_response")}]
+        st.session_state.chat_session_id = data.get("session_id")
+        st.session_state.chat_history = [data.get("message")]
         st.session_state.interview_active = data.get("conversation_is_active", True)
         st.session_state.stage = "interview"
         st.rerun()
@@ -96,13 +76,26 @@ def start_new_project_process(initial_brief_payload, uploaded_files_list):
 
 def send_chat_message(user_input_text):
     if st.session_state.chat_session_id and user_input_text:
+        # Chat history already uses the correct {"role": "...", "content": "..."} format
         st.session_state.chat_history.append({"role": "user", "content": user_input_text})
-        payload = {"session_id": st.session_state.chat_session_id, "prompt": user_input_text}
+        
+        # Create the structured message payload for the API
+        payload = {
+            "session_id": st.session_state.chat_session_id,
+            "message": {
+                "role": "user",
+                "content": user_input_text
+            }
+        }
+        
         try:
             response = requests.post(INTERVIEW_SEND_MESSAGE_ENDPOINT, json=payload, timeout=60)
             response.raise_for_status()
             data = response.json()
-            st.session_state.chat_history.append({"role": "assistant", "content": data.get("ai_response")})
+
+            # Append the entire message object from the API response
+            st.session_state.chat_history.append(data.get("message"))
+            
             st.session_state.interview_active = data.get("conversation_is_active", True)
             if not st.session_state.interview_active and data.get("final_brief_if_complete"):
                 st.session_state.final_brief_for_analysis = data.get("final_brief_if_complete")
@@ -112,42 +105,16 @@ def send_chat_message(user_input_text):
         except json.JSONDecodeError as je: st.error(f"API Response Error (Send Message). Raw: {je.doc[:200]}...")
 
 def trigger_main_analysis_from_interview():
-    if st.session_state.final_brief_for_analysis and st.session_state.chat_session_id:
-        enriched_brief = st.session_state.final_brief_for_analysis
+    if st.session_state.chat_session_id:
+        # The payload is now dead simple
+        payload = {"session_id": st.session_state.chat_session_id}
         
-        # This part constructs the rich text summary for the UserBrief
-        summary_parts = [
-            f"Initial Idea: {enriched_brief.get('project_idea_summary_initial', 'N/A')}",
-            f"Goal: {enriched_brief.get('project_goal', 'N/A')}",
-            f"Budget: {enriched_brief.get('budget_range_pkr', 'N/A')}",
-            f"Location: {enriched_brief.get('project_location_details', 'N/A')}",
-            f"Project Currency: The currency for all financial figures is {enriched_brief.get('currency', 'USD')}."
-            # The file summary is now part of the EnrichedUserProjectBrief schema
-            # But for the handoff, we can just pass the references directly.
-            # The DataStructurerForCFO will use the references.
-        ]
-        adapted_summary = ". ".join(summary_parts)
-        if len(adapted_summary) > 1500: adapted_summary = adapted_summary[:1497] + "..."
-        
-        # --- THIS IS THE CORRECT, FINAL PAYLOAD STRUCTURE ---
-        payload = {
-            "session_id": st.session_state.chat_session_id,
-            "user_brief": {
-                "project_idea_summary": adapted_summary,
-                "has_existing_files": enriched_brief.get("has_existing_files_confirmed", False),
-                "existing_files_description": enriched_brief.get("existing_files_description_updated"),
-            "currency": enriched_brief.get("currency", "USD") # Pass currency along
-        },
-        "file_references": enriched_brief.get("uploaded_file_references", [])
-    }
-        
-        # Store this complete payload and change the stage
+        # Store this payload and change the stage
         st.session_state.payload_for_main_analysis_rerun = payload
         st.session_state.stage = "analysis_progress"
         st.rerun()
     else:
-        st.error("Final brief or Session ID is missing. Cannot proceed.")
-        st.session_state.stage = "review_brief" # Stay on the review page
+        st.error("Session ID is missing. Cannot proceed.")
 
 def trigger_main_analysis(payload):
     # This function now correctly receives the fully formed payload
@@ -188,9 +155,6 @@ if st.session_state.stage == "initial_form":
             height=100,
             placeholder="e.g., I want to build a small, eco-friendly cafe in a suburban area. I have a sketch of the floor plan."
         )
-        
-        # <<< NEW CURRENCY FIELD >>>
-        currency = st.selectbox("Select Project Currency", ["USD", "PKR", "AED", "SAR", "EUR"], index=0)
 
         uploaded_files = st.file_uploader(
             "Upload Documents or Images (Optional)",
@@ -207,9 +171,6 @@ if st.session_state.stage == "initial_form":
                 # Prepare the initial brief payload
                 brief = {
                     "project_idea_summary": project_idea_summary,
-                    "has_existing_files": bool(uploaded_files),
-                    "existing_files_description": f"{len(uploaded_files)} files uploaded: " + ", ".join([f.name for f in uploaded_files]) if uploaded_files else "No files uploaded.",
-                    "currency": currency # <<< ADD CURRENCY TO PAYLOAD
                 }
                 st.session_state.initial_form_data = brief
                 start_new_project_process(brief, uploaded_files)
@@ -236,7 +197,8 @@ elif st.session_state.stage == "review_brief":
         st.markdown("---")
         col1, col2, col3 = st.columns([2,2,1])
         with col1:
-            if st.button("Proceed to Detailed Financial Analysis", type="primary", use_container_width=True): trigger_main_analysis_from_interview() 
+            if st.button("Proceed to Detailed Financial Analysis", type="primary", use_container_width=True):
+                trigger_main_analysis_from_interview()
         with col2:
             if st.button("Restart Interview (Refine Details)", use_container_width=True):
                 st.session_state.chat_history = []; st.session_state.final_brief_for_analysis = None; st.session_state.interview_active = False
@@ -369,7 +331,7 @@ elif st.session_state.stage == "results_display":
             else: st.warning(f"Reason: {results['error']}")
         else: 
             st.success("AI Financial Analysis Complete!"); st.balloons()
-            currency_code = st.session_state.get("project_currency", "USD")
+            currency_code = results.get("currency", "USD") 
             st.subheader(f"Key Financial Projections ({currency_code})") # <<< DYNAMIC CURRENCY IN TITLE
             col1, col2, col3 = st.columns(3)
             with col1: st.metric(label=f"Projected Revenue ({currency_code})", value=f"{results.get('calculated_revenue'):,.0f}" if results.get('calculated_revenue') is not None else "N/A")
