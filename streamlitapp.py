@@ -232,7 +232,7 @@ elif st.session_state.stage in ["analysis_progress", "analysis_progress_from_ove
     try:
         progress_stages = {
             10: "Initializing analysis...",
-            20: "Structuring project data from interview...",
+            20: "AI Agents are Analysing... They're on fire!",
             35: "AI Cost Estimator is running...",
             50: "AI Revenue Projector is querying knowledge base...",
             65: "Delegating to AI Financial Analyst for deep modeling...",
@@ -264,6 +264,7 @@ elif st.session_state.stage == "results_display":
     st.header("4. Financial Viability Analysis Results")
     results = st.session_state.analysis_results
     if results:
+        currency_code = results.get("currency", "USD") 
         is_preprocessing_failure_for_override = False
         preprocessing_error_detail = ""
         if "error" in results and isinstance(results.get("detail"), str) and \
@@ -336,11 +337,18 @@ elif st.session_state.stage == "results_display":
             col1, col2, col3 = st.columns(3)
             with col1: st.metric(label=f"Projected Revenue ({currency_code})", value=f"{results.get('calculated_revenue'):,.0f}" if results.get('calculated_revenue') is not None else "N/A")
             cost_disp = "N/A"
-            if results.get('calculated_cost') is not None:
-                cost_disp = f"{results.get('calculated_cost'):,.0f}"
-            elif results.get('estimated_cost_from_brief') is not None:
-                cost_disp = f"{results.get('estimated_cost_from_brief'):,.0f} (from brief)"
-            with col2: st.metric(label=f"AI Estimated Project Cost ({currency_code})", value=cost_disp)
+            fa_report = results.get("detailed_financial_analysis")
+            if fa_report:
+                # The definitive cost is the one the FA used for its analysis.
+                # In our new model, this is passed back inside the `cfo_guidance_received_by_fa` dict.
+                cfo_guidance = fa_report.get("cfo_guidance_received_by_fa")
+                if cfo_guidance and cfo_guidance.get("cfo_provided_initial_cost") is not None:
+                    initial_investment = cfo_guidance.get("cfo_provided_initial_cost")
+                    cost_disp = f"{initial_investment:,.0f}"
+            
+            with col2:
+                st.metric(label=f"AI Estimated Project Cost ({currency_code})", value=cost_disp)
+    
             with col3: st.metric(label=f"Projected Profit/Loss ({currency_code})", value=f"{results.get('calculated_profit_loss'):,.0f}" if results.get('calculated_profit_loss') is not None else "N/A")
             st.subheader("AI CFO Strategic Summary:"); st.markdown(f"> {results.get('summary_text', 'Not available.')}")
             if results.get("detailed_financial_analysis"):
