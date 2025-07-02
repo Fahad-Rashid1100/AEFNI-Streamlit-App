@@ -6,7 +6,7 @@ import re
 import time
 
 # --- Configuration ---
-FASTAPI_BASE_URL = "http://localhost:8000"
+FASTAPI_BASE_URL = "https://7ngokuvakqinzic4vldalmxyti.srv.us"
 API_V2_PREFIX = "/api/v2"
 API_V1_PREFIX = "/api/v1"
 PROJECT_INITIATE_ENDPOINT = f"{FASTAPI_BASE_URL}{API_V2_PREFIX}/project/initiate"
