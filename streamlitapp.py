@@ -6,30 +6,24 @@ import re
 import time
 
 # --- Configuration ---
-FASTAPI_BASE_URL = "https://7ngokuvakqinzic4vldalmxyti.srv.us"
+FASTAPI_BASE_URL = "http://localhost:8000"
 API_V2_PREFIX = "/api/v2"
 API_V1_PREFIX = "/api/v1"
 PROJECT_INITIATE_ENDPOINT = f"{FASTAPI_BASE_URL}{API_V2_PREFIX}/project/initiate"
 PROJECT_CHAT_ENDPOINT = f"{FASTAPI_BASE_URL}{API_V2_PREFIX}/project/chat"
 PROJECT_ANALYZE_ENDPOINT = f"{FASTAPI_BASE_URL}{API_V2_PREFIX}/project/analyze"
+PROJECT_LIST_ENDPOINT = f"{FASTAPI_BASE_URL}{API_V2_PREFIX}/projects"
 PROJECT_GET_SESSION_ENDPOINT = f"{FASTAPI_BASE_URL}{API_V2_PREFIX}/project"
 AEFNE_AUDIT_ENDPOINT = f"{FASTAPI_BASE_URL}{API_V1_PREFIX}/perform_audit"
 
 # --- Session State Management ---
 def init_session():
-    """Initializes all necessary keys in Streamlit's session state."""
     if "user_id" not in st.session_state: st.session_state.user_id = f"user_demo_{uuid.uuid4()}"
     if "project_session_id" not in st.session_state: st.session_state.project_session_id = None
-    if "current_project_data" not in st.session_state: st.session_state.current_project_data = None
     if "view" not in st.session_state: st.session_state.view = "form"
-    if "analysis_triggered" not in st.session_state: st.session_state.analysis_triggered = False
-    if "audit_triggered" not in st.session_state: st.session_state.audit_triggered = False
-    if "audit_report" not in st.session_state: st.session_state.audit_report = None
-    if "version_to_audit" not in st.session_state: st.session_state.version_to_audit = None
-    if "show_audit_results" not in st.session_state: st.session_state.show_audit_results = False # <<< We will use this flag
+    if "last_error" not in st.session_state: st.session_state.last_error = None
 
 def reset_session():
-    """Reset the session to start a new project, keeping the user_id."""
     user_id = st.session_state.user_id
     st.session_state.clear()
     st.session_state.user_id = user_id
@@ -39,19 +33,64 @@ def reset_session():
 init_session()
 
 # --- API Communication ---
-def get_session_data(session_id):
-    """Fetch the latest session data from the backend."""
+@st.cache_data(ttl=10) # Cache for 10 seconds to avoid rapid re-fetching
+def get_project_list(user_id):
+    try:
+        headers = {"Authorization": user_id}
+        response = requests.get(PROJECT_LIST_ENDPOINT, headers=headers, timeout=15)
+        response.raise_for_status()
+        return response.json().get("projects", [])
+    except requests.exceptions.RequestException as e:
+        st.sidebar.error("Could not load projects.")
+        print(e)
+        return []
+
+def get_session_data(session_id, user_id):
     if not session_id: return None
     try:
-        headers = {"Authorization": st.session_state.user_id}
+        headers = {"Authorization": user_id}
         response = requests.get(f"{PROJECT_GET_SESSION_ENDPOINT}/{session_id}", headers=headers, timeout=15)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"Could not load project session: {e}")
+        st.error(f"Error fetching session data: {e}")
         return None
 
 # --- UI Rendering Functions ---
+def render_sidebar(projects):
+    st.sidebar.title("AEFNE Projects")
+    if st.sidebar.button("Start New Project", use_container_width=True):
+        reset_session()
+    
+    st.sidebar.markdown("---")
+    for project in projects:
+        if st.sidebar.button(f"{project.get('project_name', 'Untitled')} ({project['status']})", key=project['project_session_id'], use_container_width=True):
+            st.session_state.project_session_id = project['project_session_id']
+            st.rerun()
+
+def render_form_page():
+    st.header("1. Submit Your Project Idea")
+    with st.form("project_idea_form"):
+        project_idea_summary = st.text_area("Brief Project Idea Summary:", height=100, placeholder="e.g., I want to analyze the STRABAG annual report...")
+        uploaded_files = st.file_uploader("Upload Financial Docs (Optional)", accept_multiple_files=True)
+        
+        if st.form_submit_button("Begin AEFNE Process", type="primary"):
+            if not project_idea_summary.strip():
+                st.warning("Please provide a project summary.")
+                return
+            files_to_send = [('files', (f.name, f, f.type)) for f in uploaded_files] if uploaded_files else None
+            data_payload = {'user_brief_json': json.dumps({"project_idea_summary": project_idea_summary})}
+            headers = {"Authorization": st.session_state.user_id}
+            
+            with st.spinner("AEFNE is initiating your session..."):
+                try:
+                    response = requests.post(PROJECT_INITIATE_ENDPOINT, data=data_payload, files=files_to_send, headers=headers, timeout=90)
+                    response.raise_for_status()
+                    st.session_state.project_session_id = response.json().get("project_session_id")
+                    st.rerun()
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Failed to initiate session: {e}")
+
 
 def format_brief_for_display(brief: dict, interview_type: str) -> str:
     """Dynamically formats the brief based on the interview type."""
@@ -70,33 +109,16 @@ def format_brief_for_display(brief: dict, interview_type: str) -> str:
         *   **Location**: {brief.get('project_location_details', 'N/A')}
         *   **Budget**: {brief.get('budget_range', 'N/A')}
         *   **Currency**: **{brief.get('currency', 'N/A')}**
+        *   **Timeline**: {brief.get('project_timeline', 'N/A')}
         """
-
-def render_form_page():
-    st.header("1. Submit Your Project Idea")
-    with st.form("project_idea_form"):
-        project_idea_summary = st.text_area("Brief Project Idea Summary:", height=100, placeholder="e.g., I want to analyze the STRABAG annual report...")
-        uploaded_files = st.file_uploader("Upload Financial Docs (Optional)", accept_multiple_files=True)
-        
-        if st.form_submit_button("Begin AEFNE Process", type="primary"):
-            if project_idea_summary.strip():
-                files_to_send = [('files', (f.name, f, f.type)) for f in uploaded_files] if uploaded_files else None
-                data_payload = {'user_brief_json': json.dumps({"project_idea_summary": project_idea_summary})}
-                headers = {"Authorization": st.session_state.user_id}
-                
-                with st.spinner("AEFNE is initiating your session..."):
-                    try:
-                        response = requests.post(PROJECT_INITIATE_ENDPOINT, data=data_payload, files=files_to_send, headers=headers, timeout=90)
-                        response.raise_for_status()
-                        st.session_state.project_session_id = response.json().get("project_session_id")
-                        st.rerun()
-                    except requests.exceptions.RequestException as e:
-                        st.error(f"Failed to initiate session: {e}")
-            else:
-                st.warning("Please provide a project summary.")
 
 def render_interview_page(project_data):
     st.header("2. Chat with AEFNE's Intake Specialist")
+
+    if st.session_state.last_error:
+        st.error(f"**Previous Analysis Failed:** {st.session_state.last_error}")
+        st.session_state.last_error = None # Clear error after showing it
+
     chat_container = st.container(height=450)
     with chat_container:
         for message in project_data.get("interview_history", []):
@@ -114,6 +136,9 @@ def render_interview_page(project_data):
             payload = {"project_session_id": st.session_state.project_session_id, "message": {"role": "user", "content": user_input}}
             requests.post(PROJECT_CHAT_ENDPOINT, json=payload, headers={"Authorization": st.session_state.user_id}, timeout=90)
             st.rerun()
+            
+    # --- THIS IS THE FIX ---
+    # Add the action buttons back for the "interview_complete" state.
     elif project_data.get("status") == "interview_complete":
         st.info("The interview is complete. Please review the summary above.")
         col1, col2 = st.columns(2)
@@ -122,9 +147,9 @@ def render_interview_page(project_data):
                 st.session_state.analysis_triggered = True
                 st.rerun()
         with col2:
-            if st.button("Restart Interview", use_container_width=True):
+            if st.button("🔄 Restart Interview", use_container_width=True):
                 payload = {"project_session_id": st.session_state.project_session_id, "message": {"role": "user", "content": "/restart_interview"}}
-                requests.post(PROJECT_CHAT_ENDPOINT, json=payload, headers={"Authorization": st.session_state.user_id})
+                requests.post(PROJECT_CHAT_ENDPOINT, json=payload, headers={"Authorization": st.session_state.user_id}, timeout=90)
                 st.rerun()
 
 def render_results_page(project_data):
@@ -287,55 +312,61 @@ def render_audit_page(audit_data):
 st.set_page_config(layout="wide", page_title="AEFNE AI Platform")
 st.title("AEFNE AI Platform")
 
-if st.sidebar.button("Start New Project", use_container_width=True):
-    reset_session()
+# 1. Always render the sidebar and get the list of projects
+projects = get_project_list(st.session_state.user_id)
+render_sidebar(projects)
 
+# 2. Fetch the current session data if an ID is set
+current_project_data = None
 if st.session_state.project_session_id:
-    st.session_state.current_project_data = get_session_data(st.session_state.project_session_id)
-    if st.session_state.current_project_data:
-        st.sidebar.caption(f"Session ID: `{st.session_state.project_session_id}`")
-        status = st.session_state.current_project_data.get("status")
-        st.sidebar.caption(f"Status: `{status}`")
+    current_project_data = get_session_data(st.session_state.project_session_id, st.session_state.user_id)
 
-        # --- THIS IS THE FIX: Prioritize showing the audit results ---
-        if st.session_state.show_audit_results:
-            st.session_state.view = "audit"
-        elif not st.session_state.analysis_triggered and not st.session_state.audit_triggered:
-            if status in ["analysis_complete", "analysis_failed"]:
-                st.session_state.view = "analysis"
-            elif status in ["interview_complete", "interview_in_progress"]:
-                st.session_state.view = "interview"
-            else:
-                st.session_state.view = "form"
-    else:
-        reset_session()
+# 3. Determine the view based on the current state
+view = "form" # Default view
+if current_project_data:
+    status = current_project_data.get("status")
+    if status in ["interview_in_progress", "interview_complete"]:
+        view = "interview"
+    elif status == "analysis_failed":
+        view = "analysis_failed"
+    elif status == "analysis_complete":
+        view = "analysis"
 
-# --- Action Triggers Router ---
-if st.session_state.analysis_triggered:
+# Handle action triggers from the previous run
+if "analysis_triggered" in st.session_state and st.session_state.analysis_triggered:
+    st.session_state.analysis_triggered = False
     st.session_state.view = "analysis_progress"
-elif st.session_state.audit_triggered:
+    st.rerun()
+if "audit_triggered" in st.session_state and st.session_state.audit_triggered:
+    st.session_state.audit_triggered = False
     st.session_state.view = "audit_progress"
+    st.rerun()
 
-# --- View Display Router ---
-if st.session_state.view == "form":
+# 4. Display the correct view
+if view == "form":
     render_form_page()
-elif st.session_state.view == "interview":
-    render_interview_page(st.session_state.current_project_data)
-elif st.session_state.view == "analysis":
-    if st.session_state.current_project_data.get("status") == "analysis_failed":
-        render_results_page(st.session_state.current_project_data)
-    else:
-        render_results_page(st.session_state.current_project_data)
-elif st.session_state.view == "analysis_progress":
-    st.header("3. AEFNE's AI Team at Work...")
+elif view == "interview":
+    render_interview_page(current_project_data)
+elif view == "analysis":
+    render_results_page(current_project_data)
+elif view == "analysis_failed":
+    st.error("The previous analysis failed.")
+    if st.button("Try Analysis Again", type="primary"):
+        st.session_state.analysis_triggered = True
+        st.rerun()
+elif view == "analysis_progress":
+    with st.spinner("AI agents are collaborating..."):
+        st.header("3. AEFNE's AI Team at Work...")
     with st.spinner("AI agents are collaborating... This may take a few moments."):
         try:
             payload = {"project_session_id": st.session_state.project_session_id}
             headers = {"Authorization": st.session_state.user_id}
             response = requests.post(PROJECT_ANALYZE_ENDPOINT, json=payload, headers=headers, timeout=300)
             response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            st.error(f"Analysis Failed: {e}")
+        except requests.exceptions.RequestException:
+            # The backend will have already updated the status to "analysis_failed".
+            # We don't need to do anything here except stop the trigger.
+            pass
         finally:
             st.session_state.analysis_triggered = False
             st.rerun()
@@ -343,13 +374,10 @@ elif st.session_state.view == "audit_progress":
     st.header("5. Performing AI Internal Audit...")
     with st.spinner("Auditor agents are reviewing the entire workflow..."):
         version = st.session_state.get("version_to_audit", 1)
-        
-        # --- NEW SIMPLIFIED PAYLOAD ---
         audit_payload = {
             "project_session_id": st.session_state.project_session_id,
             "version_to_audit": version
         }
-        
         try:
             headers = {"Authorization": st.session_state.user_id}
             response = requests.post(AEFNE_AUDIT_ENDPOINT, json=audit_payload, headers=headers, timeout=180)
@@ -361,5 +389,3 @@ elif st.session_state.view == "audit_progress":
             st.session_state.audit_triggered = False
             st.session_state.show_audit_results = True
             st.rerun()
-elif st.session_state.view == "audit":
-    render_audit_page(st.session_state.audit_report)
