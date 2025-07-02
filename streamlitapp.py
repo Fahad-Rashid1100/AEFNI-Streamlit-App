@@ -6,7 +6,7 @@ import re
 import time
 
 # --- Configuration ---
-FASTAPI_BASE_URL = "https://7ngokuvakqinzic4vldalmxyti.srv.us"
+FASTAPI_BASE_URL = "http://localhost:8000"
 API_V2_PREFIX = "/api/v2"
 API_V1_PREFIX = "/api/v1"
 PROJECT_INITIATE_ENDPOINT = f"{FASTAPI_BASE_URL}{API_V2_PREFIX}/project/initiate"
@@ -21,6 +21,11 @@ def init_session():
     if "user_id" not in st.session_state: st.session_state.user_id = f"user_demo_{uuid.uuid4()}"
     if "project_session_id" not in st.session_state: st.session_state.project_session_id = None
     if "view" not in st.session_state: st.session_state.view = "form"
+    if "analysis_triggered" not in st.session_state: st.session_state.analysis_triggered = False
+    if "audit_triggered" not in st.session_state: st.session_state.audit_triggered = False
+    if "audit_report" not in st.session_state: st.session_state.audit_report = None
+    if "version_to_audit" not in st.session_state: st.session_state.version_to_audit = None
+    if "show_audit_results" not in st.session_state: st.session_state.show_audit_results = False
     if "last_error" not in st.session_state: st.session_state.last_error = None
 
 def reset_session():
@@ -33,7 +38,7 @@ def reset_session():
 init_session()
 
 # --- API Communication ---
-@st.cache_data(ttl=10) # Cache for 10 seconds to avoid rapid re-fetching
+@st.cache_data(ttl=10)
 def get_project_list(user_id):
     try:
         headers = {"Authorization": user_id}
@@ -42,7 +47,6 @@ def get_project_list(user_id):
         return response.json().get("projects", [])
     except requests.exceptions.RequestException as e:
         st.sidebar.error("Could not load projects.")
-        print(e)
         return []
 
 def get_session_data(session_id, user_id):
@@ -57,6 +61,7 @@ def get_session_data(session_id, user_id):
         return None
 
 # --- UI Rendering Functions ---
+
 def render_sidebar(projects):
     st.sidebar.title("AEFNE Projects")
     if st.sidebar.button("Start New Project", use_container_width=True):
@@ -64,7 +69,9 @@ def render_sidebar(projects):
     
     st.sidebar.markdown("---")
     for project in projects:
-        if st.sidebar.button(f"{project.get('project_name', 'Untitled')} ({project['status']})", key=project['project_session_id'], use_container_width=True):
+        project_name = project.get('project_name', 'Untitled Project')
+        status = project.get('status', 'unknown')
+        if st.sidebar.button(f"{project_name} ({status})", key=project['project_session_id'], use_container_width=True):
             st.session_state.project_session_id = project['project_session_id']
             st.rerun()
 
@@ -312,51 +319,57 @@ def render_audit_page(audit_data):
 st.set_page_config(layout="wide", page_title="AEFNE AI Platform")
 st.title("AEFNE AI Platform")
 
-# 1. Always render the sidebar and get the list of projects
 projects = get_project_list(st.session_state.user_id)
 render_sidebar(projects)
 
-# 2. Fetch the current session data if an ID is set
 current_project_data = None
 if st.session_state.project_session_id:
     current_project_data = get_session_data(st.session_state.project_session_id, st.session_state.user_id)
 
-# 3. Determine the view based on the current state
-view = "form" # Default view
-if current_project_data:
-    status = current_project_data.get("status")
-    if status in ["interview_in_progress", "interview_complete"]:
-        view = "interview"
-    elif status == "analysis_failed":
-        view = "analysis_failed"
-    elif status == "analysis_complete":
-        view = "analysis"
+# --- THIS IS THE FIX: A proper state machine router ---
 
-# Handle action triggers from the previous run
-if "analysis_triggered" in st.session_state and st.session_state.analysis_triggered:
-    st.session_state.analysis_triggered = False
+# 1. First, check for action triggers from the last run. They take top priority.
+if st.session_state.get("analysis_triggered"):
+    st.session_state.analysis_triggered = False # Consume the trigger
     st.session_state.view = "analysis_progress"
-    st.rerun()
-if "audit_triggered" in st.session_state and st.session_state.audit_triggered:
-    st.session_state.audit_triggered = False
+elif st.session_state.get("audit_triggered"):
+    st.session_state.audit_triggered = False # Consume the trigger
     st.session_state.view = "audit_progress"
-    st.rerun()
+else:
+    # 2. If no trigger, determine view from the current data state
+    if not st.session_state.project_session_id or not current_project_data:
+        st.session_state.view = "form"
+    else:
+        status = current_project_data.get("status")
+        if st.session_state.get("show_audit_results"):
+             st.session_state.view = "audit"
+        elif status in ["interview_in_progress", "interview_complete"]:
+            st.session_state.view = "interview"
+        elif status == "analysis_complete":
+            st.session_state.view = "analysis"
+        elif status == "analysis_failed":
+            st.session_state.view = "interview" # Go back to interview page
+            error_info = current_project_data.get("analysis_result", {})
+            st.session_state.last_error = error_info.get("error", "An unknown error occurred.")
+        else:
+            st.session_state.view = "form"
 
-# 4. Display the correct view
-if view == "form":
+# 3. Now, render the determined view
+if st.session_state.view == "form":
     render_form_page()
-elif view == "interview":
-    render_interview_page(current_project_data)
-elif view == "analysis":
+elif st.session_state.view == "interview":
+    if current_project_data:
+        render_interview_page(current_project_data)
+    else:
+        # This case handles when a project is deleted or fails to load
+        st.warning("Please select or start a new project.")
+        render_form_page()
+elif st.session_state.view == "analysis":
     render_results_page(current_project_data)
-elif view == "analysis_failed":
-    st.error("The previous analysis failed.")
-    if st.button("Try Analysis Again", type="primary"):
-        st.session_state.analysis_triggered = True
-        st.rerun()
-elif view == "analysis_progress":
-    with st.spinner("AI agents are collaborating..."):
-        st.header("3. AEFNE's AI Team at Work...")
+elif st.session_state.view == "audit":
+    render_audit_page(st.session_state.audit_report)
+elif st.session_state.view == "analysis_progress":
+    st.header("3. AEFNE's AI Team at Work...")
     with st.spinner("AI agents are collaborating... This may take a few moments."):
         try:
             payload = {"project_session_id": st.session_state.project_session_id}
@@ -364,12 +377,10 @@ elif view == "analysis_progress":
             response = requests.post(PROJECT_ANALYZE_ENDPOINT, json=payload, headers=headers, timeout=300)
             response.raise_for_status()
         except requests.exceptions.RequestException:
-            # The backend will have already updated the status to "analysis_failed".
-            # We don't need to do anything here except stop the trigger.
+            # Backend updates status to "analysis_failed". The next rerun will catch it.
             pass
         finally:
-            st.session_state.analysis_triggered = False
-            st.rerun()
+            st.rerun() # Rerun to fetch the new status ("analysis_complete" or "analysis_failed")
 elif st.session_state.view == "audit_progress":
     st.header("5. Performing AI Internal Audit...")
     with st.spinner("Auditor agents are reviewing the entire workflow..."):
@@ -386,6 +397,5 @@ elif st.session_state.view == "audit_progress":
         except requests.exceptions.RequestException as e:
             st.session_state.audit_report = {"error": str(e), "detail": "Failed during audit API call."}
         finally:
-            st.session_state.audit_triggered = False
             st.session_state.show_audit_results = True
             st.rerun()
